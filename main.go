@@ -8,15 +8,18 @@ import (
 	"io"
 	"net/http"
 	"time"
+	"sync"
 
 	// "net/url"
 
 	// "regexp"
+	"log"
 	"os"
 	"strings"
 
 	"github.com/PuerkitoBio/goquery"
 	"github.com/gocolly/colly/v2"
+	"github.com/joho/godotenv"
 )
 
 type RestaurantData struct {
@@ -28,15 +31,54 @@ type RestaurantData struct {
 
 // Main function
 func main() {
+	// Load .env file
+    err := godotenv.Load()
+    if err != nil {
+        log.Fatalf("Error loading .env file: %v", err)
+    }
+
+    // Access the key
+    apiKey := os.Getenv("GOOGLE_MAPS_API_KEY")
+
+    if apiKey == "" {
+        log.Fatal("GOOGLE_MAPS_API_KEY not set in .env file")
+    }
+
+
+	// Set path for exporting file
+	filePath := "restaurants.csv"
+
+	// Create file
+	file, err := os.Create(filePath)
+	if err != nil {
+		log.Fatalf("Error creating file: %v", err)
+	}
+
+	// Close the file after all goroutines finish
+	defer func() {
+		log.Println("Closing the file.")
+		if closeErr := file.Close(); closeErr != nil {
+			log.Printf("Error closing file: %v", closeErr)
+		}
+	}()
+
+	
+
+	// Create channel for restaurant data
+	results := make(chan RestaurantData)
+	done := make(chan struct{}) // Signal channel to say writing is done
+	var crawlWg sync.WaitGroup
+
+	go writeWorker(file, results, done)
+
 	// 1. Get restaurant website URLs from Google Places (nearby) API
 	// Set up parameters for func call
-	const GOOGLE_MAPS_API_KEY string = ""
 	center := LatLng{Latitude: 34.0549, Longitude: -118.2426}
 	radius := 500.0
 	maxCount := 3
 
 	// Get places
-	places, err := GetNearbyPlaces(GOOGLE_MAPS_API_KEY, center, radius, maxCount)
+	places, err := GetNearbyPlaces(apiKey, center, radius, maxCount)
 	if err != nil {
 		fmt.Println("Error:", err)
 		return
@@ -53,34 +95,32 @@ func main() {
 	}
 
 	fmt.Printf("Total places: %d\n", len(places))
+	fmt.Println()
 
-	// 3. Set up goroutine for writing
-	// Create channel for restaurant data
-	results := make(chan RestaurantData)
+	
+	for _, url := range urls {
+        crawlWg.Add(1)
+        go crawlSite(url, results, &crawlWg)
+    } 
+	
+	
+	crawlWg.Wait()
+	close(results)
+	<-done
 
-	go func() {
-		file, _ := os.Create("restaurants.csv")
-		defer file.Close()
-		w := csv.NewWriter(file)
-		defer w.Flush()
-		w.Write([]string{"URL", "Phones", "Emails", "OrderingLinks"})
+	fmt.Printf("\n\nSilverfish done crawling!\n")
+}
 
-		for r := range results {
-			w.Write([]string{
-				r.URL,
-				strings.Join(r.PhoneNumbers, ";"),
-				strings.Join(r.Emails, ";"),
-				strings.Join(r.OrderingLinks, ";"),
-			})
-		}
-	}()
+// Goroutine crawls a restaurant website concurrently and returns record to results channel
+func crawlSite(url string, results chan<- RestaurantData, wg *sync.WaitGroup) {
+    defer wg.Done()
 
-	// 4. Loop through URLs and call the Crawl function on them concurrently
 	// Create collector
-	c := colly.NewCollector(
-		colly.Async(true),
-		colly.MaxDepth(1),
-	)
+    c := colly.NewCollector(
+        colly.AllowedDomains(url),
+        colly.Async(true),
+		colly.MaxDepth(10),
+    )
 
 	// Limit concurrency to avoid overloading sites
 	c.Limit(&colly.LimitRule{
@@ -89,7 +129,10 @@ func main() {
 		Delay:       1 * time.Second,
 	})
 
-	// Callback func for when html element is encountered
+    var record RestaurantData
+    record.URL = url
+
+    // Callback func for when html element is encountered
 	c.OnHTML("body", func(e *colly.HTMLElement) {
 		phone := e.DOM.Find("a[href^='tel:']").Text()
 		email := e.DOM.Find("a[href^='mailto:']").Text()
@@ -108,22 +151,41 @@ func main() {
 		fmt.Println("Failed:", r.Request.URL, err)
 	})
 
-	// Track visited
-	visited := make(map[string]bool)
+    // When domain crawl completes
+    c.OnScraped(func(_ *colly.Response) {
+        results <- record // Send to writer
+    })
 
-	// Visit all urls in the slice
-	for _, url := range urls {
-		if !visited[url] {
-			visited[url] = true
-			c.Visit(url)
-		}
+	// Visit the website
+    c.Visit(url)
+    c.Wait()
+}
+
+
+func writeWorker(file *os.File, records <-chan RestaurantData, done chan<- struct{}) {
+	defer func() { done <- struct{}{} }()
+	
+	w := csv.NewWriter(file)
+	defer w.Flush()
+
+	// Write the header
+	header := []string{"URL", "Phones", "Emails", "OrderingLinks"}
+	if err := w.Write(header); err != nil {
+		log.Printf("Error writing header: %v", err)
+		return
 	}
 
-	// Wait until all crawling is done
-	c.Wait()
-	close(results)
-
-	fmt.Printf("\n\nSilverfish done crawling!")
+	// Write the records
+	for r := range records {
+		if err := w.Write([]string{
+			r.URL,
+			strings.Join(r.PhoneNumbers, ";"),
+			strings.Join(r.Emails, ";"),
+			strings.Join(r.OrderingLinks, ";"),
+		}); err != nil {
+			log.Printf("Error writing record: %v", err)
+		}
+	}
 
 }
 
