@@ -75,7 +75,7 @@ func main() {
 	// Set up parameters for func call
 	center := LatLng{Latitude: 34.0549, Longitude: -118.2426}
 	radius := 500.0
-	maxCount := 3
+	maxCount := 10
 
 	// Get places
 	places, err := GetNearbyPlaces(apiKey, center, radius, maxCount)
@@ -91,7 +91,10 @@ func main() {
 	// Loop through places and append urls
 	for _, p := range places {
 		fmt.Printf("Name: %s - Website URL: %s\n", p.DisplayName.Text, p.WebsiteURI)
-		urls = append(urls, p.WebsiteURI)
+
+		if (p.WebsiteURI != "") {
+			urls = append(urls, p.WebsiteURI)
+		}
 	}
 
 	fmt.Printf("Total places: %d\n", len(places))
@@ -100,6 +103,7 @@ func main() {
 	
 	for _, url := range urls {
         crawlWg.Add(1)
+		fmt.Println("Calling crawl site!")
         go crawlSite(url, results, &crawlWg)
     } 
 	
@@ -111,13 +115,22 @@ func main() {
 	fmt.Printf("\n\nSilverfish done crawling!\n")
 }
 
+func appendUnique(slice []string, item string) []string {
+    for _, s := range slice {
+        if s == item {
+            return slice
+        }
+    }
+    return append(slice, item)
+}
+
+
 // Goroutine crawls a restaurant website concurrently and returns record to results channel
 func crawlSite(url string, results chan<- RestaurantData, wg *sync.WaitGroup) {
     defer wg.Done()
 
 	// Create collector
     c := colly.NewCollector(
-        colly.AllowedDomains(url),
         colly.Async(true),
 		colly.MaxDepth(10),
     )
@@ -132,17 +145,32 @@ func crawlSite(url string, results chan<- RestaurantData, wg *sync.WaitGroup) {
     var record RestaurantData
     record.URL = url
 
+	var mu sync.Mutex
+
     // Callback func for when html element is encountered
 	c.OnHTML("body", func(e *colly.HTMLElement) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		orderingSet := make(map[string]bool)
+
 		phone := e.DOM.Find("a[href^='tel:']").Text()
 		email := e.DOM.Find("a[href^='mailto:']").Text()
-		fmt.Println("URL:", e.Request.URL, "Phone:", phone, "Email:", email)
+
+		if phone != "" {
+			record.PhoneNumbers = appendUnique(record.PhoneNumbers, phone)
+		}
+		if email != "" {
+			record.Emails = appendUnique(record.Emails, email)
+		}
 
 		// find ordering links
 		e.DOM.Find("a").Each(func(_ int, s *goquery.Selection) {
 			href, _ := s.Attr("href")
-			if strings.Contains(href, "order") {
-				fmt.Println("Ordering link:", e.Request.AbsoluteURL(href))
+			abs := e.Request.AbsoluteURL(href)
+			if strings.Contains(abs, "order") && !orderingSet[abs] {
+				orderingSet[abs] = true
+				record.OrderingLinks = append(record.OrderingLinks, abs)
 			}
 		})
 	})
@@ -153,17 +181,27 @@ func crawlSite(url string, results chan<- RestaurantData, wg *sync.WaitGroup) {
 
     // When domain crawl completes
     c.OnScraped(func(_ *colly.Response) {
+		mu.Lock()
+    	defer mu.Unlock()
+
+		fmt.Println("Done crawling a domain");
         results <- record // Send to writer
     })
 
 	// Visit the website
-    c.Visit(url)
+	err := c.Visit(url)
+    if err != nil {
+        fmt.Println("Visit failed:", url, err)
+        return
+    }
     c.Wait()
 }
 
 
 func writeWorker(file *os.File, records <-chan RestaurantData, done chan<- struct{}) {
 	defer func() { done <- struct{}{} }()
+
+	fmt.Println("Write worker ready for duty!")
 	
 	w := csv.NewWriter(file)
 	defer w.Flush()
