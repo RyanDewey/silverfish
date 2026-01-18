@@ -7,12 +7,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"time"
+	"slices"
 	"sync"
+	"time"
+	"net/url"
 
-	// "net/url"
-
-	// "regexp"
+	"regexp"
 	"log"
 	"os"
 	"strings"
@@ -20,6 +20,7 @@ import (
 	"github.com/PuerkitoBio/goquery"
 	"github.com/gocolly/colly/v2"
 	"github.com/joho/godotenv"
+	"golang.org/x/net/publicsuffix"
 )
 
 type RestaurantData struct {
@@ -32,18 +33,17 @@ type RestaurantData struct {
 // Main function
 func main() {
 	// Load .env file
-    err := godotenv.Load()
-    if err != nil {
-        log.Fatalf("Error loading .env file: %v", err)
-    }
+	err := godotenv.Load()
+	if err != nil {
+		log.Fatalf("Error loading .env file: %v", err)
+	}
 
-    // Access the key
-    apiKey := os.Getenv("GOOGLE_MAPS_API_KEY")
+	// Access the key
+	apiKey := os.Getenv("GOOGLE_MAPS_API_KEY")
 
-    if apiKey == "" {
-        log.Fatal("GOOGLE_MAPS_API_KEY not set in .env file")
-    }
-
+	if apiKey == "" {
+		log.Fatal("GOOGLE_MAPS_API_KEY not set in .env file")
+	}
 
 	// Set path for exporting file
 	filePath := "restaurants.csv"
@@ -62,8 +62,6 @@ func main() {
 		}
 	}()
 
-	
-
 	// Create channel for restaurant data
 	results := make(chan RestaurantData)
 	done := make(chan struct{}) // Signal channel to say writing is done
@@ -73,15 +71,42 @@ func main() {
 
 	// 1. Get restaurant website URLs from Google Places (nearby) API
 	// Set up parameters for func call
-	center := LatLng{Latitude: 34.0549, Longitude: -118.2426}
-	radius := 500.0
-	maxCount := 10
+	// center := LatLng{Latitude: 34.0549, Longitude: -118.2426}
+	// radius := 500.0
+	// maxCount := 10
 
 	// Get places
-	places, err := GetNearbyPlaces(apiKey, center, radius, maxCount)
-	if err != nil {
-		fmt.Println("Error:", err)
-		return
+	// places, err := GetNearbyPlaces(apiKey, center, radius, maxCount)
+	// if err != nil {
+	// 	fmt.Println("Error getting places:", err)
+	// 	return
+	// }
+
+	places := []Place{
+		{
+			DisplayName: struct {
+				Text string `json:"text"`
+			}{Text: "Fat Sal's"},
+			WebsiteURI: "https://www.fatsalsdeli.com/",
+		},
+		{
+			DisplayName: struct {
+				Text string `json:"text"`
+			}{Text: "Barney's Beanery"},
+			WebsiteURI: "https://barneysbeanery.com/",
+		},
+		{
+			DisplayName: struct {
+				Text string `json:"text"`
+			}{Text: "Wolf's Glen"},
+			WebsiteURI: "https://wolfsglen.com/",
+		},
+		{
+			DisplayName: struct {
+				Text string `json:"text"`
+			}{Text: "Gogobop"},
+			WebsiteURI: "https://www.gogobop.com/",
+		},
 	}
 
 	// 2. Store all URLs in a queue
@@ -92,7 +117,7 @@ func main() {
 	for _, p := range places {
 		fmt.Printf("Name: %s - Website URL: %s\n", p.DisplayName.Text, p.WebsiteURI)
 
-		if (p.WebsiteURI != "") {
+		if p.WebsiteURI != "" {
 			urls = append(urls, p.WebsiteURI)
 		}
 	}
@@ -100,14 +125,13 @@ func main() {
 	fmt.Printf("Total places: %d\n", len(places))
 	fmt.Println()
 
-	
+	// Start crawling sites
 	for _, url := range urls {
-        crawlWg.Add(1)
+		crawlWg.Add(1)
 		fmt.Println("Calling crawl site!")
-        go crawlSite(url, results, &crawlWg)
-    } 
-	
-	
+		go crawlSite(url, results, &crawlWg)
+	}
+
 	crawlWg.Wait()
 	close(results)
 	<-done
@@ -116,24 +140,21 @@ func main() {
 }
 
 func appendUnique(slice []string, item string) []string {
-    for _, s := range slice {
-        if s == item {
-            return slice
-        }
-    }
-    return append(slice, item)
+	if slices.Contains(slice, item) {
+		return slice
+	}
+	return append(slice, item)
 }
 
-
 // Goroutine crawls a restaurant website concurrently and returns record to results channel
-func crawlSite(url string, results chan<- RestaurantData, wg *sync.WaitGroup) {
-    defer wg.Done()
+func crawlSite(Url string, results chan<- RestaurantData, wg *sync.WaitGroup) {
+	defer wg.Done()
 
 	// Create collector
-    c := colly.NewCollector(
-        colly.Async(true),
-		colly.MaxDepth(10),
-    )
+	c := colly.NewCollector(
+		colly.Async(true),
+		colly.MaxDepth(3),
+	)
 
 	// Limit concurrency to avoid overloading sites
 	c.Limit(&colly.LimitRule{
@@ -142,26 +163,38 @@ func crawlSite(url string, results chan<- RestaurantData, wg *sync.WaitGroup) {
 		Delay:       1 * time.Second,
 	})
 
-    var record RestaurantData
-    record.URL = url
+	var record RestaurantData
+	record.URL = Url
 
 	var mu sync.Mutex
 
-    // Callback func for when html element is encountered
+	// Callback func for when html element is encountered
 	c.OnHTML("body", func(e *colly.HTMLElement) {
 		mu.Lock()
 		defer mu.Unlock()
 
 		orderingSet := make(map[string]bool)
 
-		phone := e.DOM.Find("a[href^='tel:']").Text()
-		email := e.DOM.Find("a[href^='mailto:']").Text()
+		// Regex filter for phone numbers
+		// re := regexp.MustCompile(`\+?\d[\d\s\-\(\)]{7,}\d`)
+
+		// e.DOM.Find("a[href^='tel:'], .phone, .contact, [href*='call'], span:contains('Call'), div:contains('Call')").Each(func(_ int, s *goquery.Selection) {
+		// 	text := strings.TrimSpace(s.Text())
+		// 	if re.MatchString(text) {
+		// 		record.PhoneNumbers = appendUnique(record.PhoneNumbers, text)
+		// 	}
+		// })
+
+		phone, _ := e.DOM.Find("a[href^='tel:']").Attr("href")
+
+		email, _ := e.DOM.Find("a[href^='mailto:']").Attr("href")
 
 		if phone != "" {
-			record.PhoneNumbers = appendUnique(record.PhoneNumbers, phone)
+			record.PhoneNumbers = appendUnique(record.PhoneNumbers, phone[4:])
 		}
+
 		if email != "" {
-			record.Emails = appendUnique(record.Emails, email)
+			record.Emails = appendUnique(record.Emails, email[7:])
 		}
 
 		// find ordering links
@@ -175,34 +208,74 @@ func crawlSite(url string, results chan<- RestaurantData, wg *sync.WaitGroup) {
 		})
 	})
 
+	// Keep track of visited URLs
+	visited := make(map[string]bool)
+	visitedMu := sync.Mutex{}
+
+	// Keywords to follow
+	keywords := []string{
+		"contact", "about", "location", "order", "menu",
+		"info", "reservations", "reservation", "shop",
+		"store", "pickup", "delivery",
+	}
+
+	c.OnHTML("a[href]", func(e *colly.HTMLElement) {
+		link := e.Request.AbsoluteURL(e.Attr("href"))
+		if link == "" {
+			return
+		}
+
+		// Normalize the link to prevent duplicates
+		normalized := strings.TrimSuffix(link, "/")
+		u, err := url.Parse(normalized)
+		if err == nil {
+			u.RawQuery = "" // remove query params for deduping
+			normalized = u.String()
+		}
+
+		// Only follow if keyword is in URL
+		for _, k := range keywords {
+			if strings.Contains(strings.ToLower(normalized), k) {
+				visitedMu.Lock()
+				if !visited[normalized] {
+					visited[normalized] = true
+					visitedMu.Unlock()
+					e.Request.Visit(normalized)
+				} else {
+					visitedMu.Unlock()
+				}
+				break
+			}
+		}
+	})
+
 	c.OnError(func(r *colly.Response, err error) {
 		fmt.Println("Failed:", r.Request.URL, err)
 	})
 
-    // When domain crawl completes
-    c.OnScraped(func(_ *colly.Response) {
+	// When domain crawl completes
+	c.OnScraped(func(_ *colly.Response) {
 		mu.Lock()
-    	defer mu.Unlock()
+		defer mu.Unlock()
 
-		fmt.Println("Done crawling a domain");
-        results <- record // Send to writer
-    })
+		fmt.Println("Done crawling a domain")
+		results <- record // Send to writer
+	})
 
 	// Visit the website
-	err := c.Visit(url)
-    if err != nil {
-        fmt.Println("Visit failed:", url, err)
-        return
-    }
-    c.Wait()
+	err := c.Visit(Url)
+	if err != nil {
+		fmt.Println("Visit failed:", Url, err)
+		return
+	}
+	c.Wait()
 }
-
 
 func writeWorker(file *os.File, records <-chan RestaurantData, done chan<- struct{}) {
 	defer func() { done <- struct{}{} }()
 
 	fmt.Println("Write worker ready for duty!")
-	
+
 	w := csv.NewWriter(file)
 	defer w.Flush()
 
@@ -213,18 +286,83 @@ func writeWorker(file *os.File, records <-chan RestaurantData, done chan<- struc
 		return
 	}
 
+	// Dedupe with a seen map
+	visitedDomains := make(map[string]bool)
+
 	// Write the records
 	for r := range records {
-		if err := w.Write([]string{
-			r.URL,
-			strings.Join(r.PhoneNumbers, ";"),
-			strings.Join(r.Emails, ";"),
-			strings.Join(r.OrderingLinks, ";"),
-		}); err != nil {
-			log.Printf("Error writing record: %v", err)
-		}
+
+		// Normalize the URL
+		normalizedURL := r.URL
+
+		// Write record if not in visited
+		if !visitedDomains[normalizedURL] {
+			// Add the domain to the visited map
+			visitedDomains[normalizedURL] = true
+
+			// Write the record, handle error
+			if err := w.Write([]string{
+				normalizedURL,
+				strings.Join(r.PhoneNumbers, ";"),
+				strings.Join(r.Emails, ";"),
+				strings.Join(r.OrderingLinks, ";"),
+			}); err != nil {
+				log.Printf("Error writing record: %v", err)
+			}
+		} 
+
 	}
 
+}
+
+
+func NormalizeDomainKey(website string) (string, bool) {
+	s := strings.TrimSpace(website)
+	if s == "" {
+		return "", false
+	}
+
+	// Ignore non-web schemes
+	lower := strings.ToLower(s)
+	if strings.HasPrefix(lower, "mailto:") ||
+		strings.HasPrefix(lower, "tel:") ||
+		strings.HasPrefix(lower, "javascript:") ||
+		strings.HasPrefix(lower, "data:") {
+		return "", false
+	}
+
+	// Handle protocol-relative URLs: //example.com/path
+	if strings.HasPrefix(s, "//") {
+		s = "https:" + s
+	}
+
+	// If missing scheme, prepend https:// so url.Parse can find Host.
+	if !strings.Contains(s, "://") {
+		s = "https://" + s
+	}
+
+	u, err := url.Parse(s)
+	if err != nil {
+		return "", false
+	}
+
+	host := strings.ToLower(strings.TrimSuffix(u.Hostname(), "."))
+	if host == "" {
+		return "", false
+	}
+
+	// Strip www / www2 / www10 ...
+	wwwPrefixRe := regexp.MustCompile(`^www\d*\.`)
+	host = wwwPrefixRe.ReplaceAllString(host, "")
+
+	// Convert to registrable domain (effective TLD + 1)
+	etld1, err := publicsuffix.EffectiveTLDPlusOne(host)
+	if err != nil {
+		// Fallback: return the host itself if PSL fails
+		return host, true
+	}
+
+	return etld1, true
 }
 
 type LatLng struct {
