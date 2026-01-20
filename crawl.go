@@ -40,7 +40,24 @@ func crawlSite(Url string, results chan<- RestaurantData, wg *sync.WaitGroup) {
 	var record RestaurantData
 	record.URL = Url
 
-	var mu sync.Mutex
+	var (
+		mu sync.Mutex
+		pending int // Keep track of the current number of pages being scraped
+		emitted bool
+	)
+
+	// Sends record to writer if all pages scraped
+	finalizeIfDone := func() {
+		if pending != 0 || emitted {
+			return
+		}
+		emitted = true
+
+		recCopy := record // copy while locked if record is a struct
+		mu.Unlock()       // unlock before sending (avoid blocking while locked)
+		results <- recCopy
+		mu.Lock()
+	}
 
 	// Callback func for when html element is encountered
 	c.OnHTML("body", func(e *colly.HTMLElement) {
@@ -124,16 +141,34 @@ func crawlSite(Url string, results chan<- RestaurantData, wg *sync.WaitGroup) {
 	})
 
 	c.OnError(func(r *colly.Response, err error) {
-		fmt.Println("Failed:", r.Request.URL, err)
+		urlStr := ""
+		status := 0
+		if r != nil {
+			urlStr = r.Request.URL.String()
+			status = r.StatusCode
+		}
+		fmt.Printf("ERROR url=%s status=%d err=%v\n", urlStr, status, err)
+
+		mu.Lock()
+		pending--          
+		finalizeIfDone()   // emit record even if pages failed
+		mu.Unlock()
 	})
 
-	// When domain crawl completes
+	// Each new page, increment the counter
+	c.OnRequest(func(_ *colly.Request) {
+		mu.Lock()
+		pending++
+		mu.Unlock()
+	})
+
+	// Decrement counter when the page is scraped, send record if all pages have been scraped
 	c.OnScraped(func(_ *colly.Response) {
 		mu.Lock()
-		defer mu.Unlock()
-
-		fmt.Println("Done crawling a domain")
-		results <- record // Send to writer
+		pending--
+		finalizeIfDone()
+		mu.Unlock()
+		fmt.Println("Done crawling a page")
 	})
 
 	// Visit the website
