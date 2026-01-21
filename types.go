@@ -5,6 +5,7 @@ type RestaurantData struct {
 	PhoneNumbers  []string
 	Emails        []string
 	OrderingLinks []string
+	hasOnlineOrdering bool
 }
 
 type LatLng struct {

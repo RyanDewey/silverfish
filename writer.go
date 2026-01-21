@@ -22,7 +22,7 @@ func writeWorker(file *os.File, records <-chan RestaurantData, done chan<- struc
 	defer w.Flush()
 
 	// Write the header
-	header := []string{"URL", "Phones", "Emails", "OrderingLinks"}
+	header := []string{"URL", "Phones", "Emails", "OrderingLinks", "HasOnlineOrdering"}
 	if err := w.Write(header); err != nil {
 		log.Printf("Error writing header: %v", err)
 		return
@@ -52,6 +52,7 @@ func writeWorker(file *os.File, records <-chan RestaurantData, done chan<- struc
 				strings.Join(r.PhoneNumbers, ";"),
 				strings.Join(r.Emails, ";"),
 				strings.Join(r.OrderingLinks, ";"),
+				fmt.Sprintf("%t", r.hasOnlineOrdering),
 			}); err != nil {
 				log.Printf("Error writing record: %v", err)
 			}

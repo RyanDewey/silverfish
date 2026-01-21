@@ -6,8 +6,8 @@ import (
 	"sync"
 	"time"
 	"net/url"
-
 	"strings"
+	"regexp"
 
 	"github.com/PuerkitoBio/goquery"
 	"github.com/gocolly/colly/v2"
@@ -19,6 +19,57 @@ func appendUnique(slice []string, item string) []string {
 	}
 	return append(slice, item)
 }
+
+var blockedKeywords = []string{
+	"ubereats",
+	"uber",
+	"doordash",
+	"postmates",
+	"grubhub",
+	"toast",
+	"toasttab",
+	"chownow",
+	"caviar",
+	"delivery",
+}
+
+func isBlockedLink(link string) bool {
+	l := strings.ToLower(link)
+	for _, kw := range blockedKeywords {
+		if strings.Contains(l, "://"+kw) || strings.Contains(l, "."+kw+".") {
+			return true
+		}
+	}
+	return false
+}
+
+var digitsRe = regexp.MustCompile(`\d+`)
+
+func normalizePhone(s string) (string, bool) {
+	// Keep digits only
+	digits := strings.Join(digitsRe.FindAllString(s, -1), "")
+	if digits == "" {
+		return "", false
+	}
+
+	// US-centric normalization:
+	// Allow 11 digits starting with 1
+	if len(digits) == 11 && digits[0] == '1' {
+		digits = digits[1:]
+	}
+	if len(digits) != 10 {
+		return "", false
+	}
+
+	// Reject obvious garbage
+	if digits == "0000000000" {
+		return "", false
+	}
+
+	// Format consistently (helps dedupe)
+	return digits[:3] + "-" + digits[3:6] + "-" + digits[6:], true
+}
+
 
 // Goroutine crawls a restaurant website concurrently and returns record to results channel
 func crawlSite(Url string, results chan<- RestaurantData, wg *sync.WaitGroup) {
@@ -54,6 +105,10 @@ func crawlSite(Url string, results chan<- RestaurantData, wg *sync.WaitGroup) {
 		emitted = true
 
 		recCopy := record // copy while locked if record is a struct
+		// Set hasOnlineOrdering to true if ordering links
+		if len(recCopy.OrderingLinks) > 0 {
+			recCopy.hasOnlineOrdering = true
+		}
 		mu.Unlock()       // unlock before sending (avoid blocking while locked)
 		results <- recCopy
 		mu.Lock()
@@ -67,22 +122,35 @@ func crawlSite(Url string, results chan<- RestaurantData, wg *sync.WaitGroup) {
 		orderingSet := make(map[string]bool)
 
 		// Regex filter for phone numbers
-		// re := regexp.MustCompile(`\+?\d[\d\s\-\(\)]{7,}\d`)
+		phoneRe := regexp.MustCompile(`(?i)(?:\+?1[\s\-.]?)?(?:\(\s*\d{3}\s*\)|\d{3})[\s\-.]?\d{3}[\s\-.]?\d{4}(?:\s*(?:x|ext\.?)\s*\d{1,6})?`)
 
-		// e.DOM.Find("a[href^='tel:'], .phone, .contact, [href*='call'], span:contains('Call'), div:contains('Call')").Each(func(_ int, s *goquery.Selection) {
-		// 	text := strings.TrimSpace(s.Text())
-		// 	if re.MatchString(text) {
-		// 		record.PhoneNumbers = appendUnique(record.PhoneNumbers, text)
-		// 	}
-		// })
+		// First check for links with the tel: attribute for high accuracy numbers
+		e.DOM.Find("a[href^='tel:']").Each(func(_ int, s *goquery.Selection) {
+			href, _ := s.Attr("href")
+			// href like "tel:+1-949-555-1212"
+			raw := strings.TrimSpace(strings.TrimPrefix(strings.ToLower(href), "tel:"))
+			if raw != "" {
+				if norm, ok := normalizePhone(raw); ok {
+					record.PhoneNumbers = appendUnique(record.PhoneNumbers, norm)
+				}
+			}
+		})
 
-		phone, _ := e.DOM.Find("a[href^='tel:']").Attr("href")
+		// Then scan the whole page for matches to the phone regex
+
+		// Remove noise
+		e.DOM.Find("script, style, noscript").Remove()
+		// collapse whitespace
+		pageText := strings.Join(strings.Fields(e.DOM.Text()), " ") 
+		// Add regex phone matches to the record
+		matches := phoneRe.FindAllString(pageText, -1)
+		for _, m := range matches {
+			if norm, ok := normalizePhone(m); ok {
+				record.PhoneNumbers = appendUnique(record.PhoneNumbers, norm)
+			}
+		}
 
 		email, _ := e.DOM.Find("a[href^='mailto:']").Attr("href")
-
-		if phone != "" {
-			record.PhoneNumbers = appendUnique(record.PhoneNumbers, phone[4:])
-		}
 
 		if email != "" {
 			record.Emails = appendUnique(record.Emails, email[7:])
@@ -94,7 +162,9 @@ func crawlSite(Url string, results chan<- RestaurantData, wg *sync.WaitGroup) {
 			abs := e.Request.AbsoluteURL(href)
 			if strings.Contains(abs, "order") && !orderingSet[abs] {
 				orderingSet[abs] = true
-				record.OrderingLinks = append(record.OrderingLinks, abs)
+				if len(record.OrderingLinks) < 2 {
+					record.OrderingLinks = appendUnique(record.OrderingLinks, abs)
+				}
 			}
 		})
 	})
@@ -105,10 +175,10 @@ func crawlSite(Url string, results chan<- RestaurantData, wg *sync.WaitGroup) {
 
 	// Keywords to follow
 	keywords := []string{
-		"contact", "about", "location", "order", "menu",
-		"info", "reservations", "reservation", "shop",
-		"store", "pickup", "delivery",
+		"contact", "about", "location", "order",
+		"info", "store", "pickup", "delivery",
 	}
+
 
 	c.OnHTML("a[href]", func(e *colly.HTMLElement) {
 		link := e.Request.AbsoluteURL(e.Attr("href"))
@@ -128,7 +198,12 @@ func crawlSite(Url string, results chan<- RestaurantData, wg *sync.WaitGroup) {
 		for _, k := range keywords {
 			if strings.Contains(strings.ToLower(normalized), k) {
 				visitedMu.Lock()
-				if !visited[normalized] {
+				// Set online ordering flag if link gets blocked
+				if isBlockedLink(normalized) {
+					record.hasOnlineOrdering = true
+				}
+				// Check if the link hasnt been visited and isnt blocked to queue next
+				if !visited[normalized] && !isBlockedLink(normalized) {
 					visited[normalized] = true
 					visitedMu.Unlock()
 					e.Request.Visit(normalized)

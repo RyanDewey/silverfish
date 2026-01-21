@@ -7,26 +7,10 @@ import (
 	// "regexp"
 	"log"
 	"os"
-
-	"github.com/joho/godotenv"
 )
-
 
 // Main function
 func main() {
-	// Load .env file
-	err := godotenv.Load()
-	if err != nil {
-		log.Fatalf("Error loading .env file: %v", err)
-	}
-
-	// Access the key
-	apiKey := os.Getenv("GOOGLE_MAPS_API_KEY")
-
-	if apiKey == "" {
-		log.Fatal("GOOGLE_MAPS_API_KEY not set in .env file")
-	}
-
 	// Set path for exporting file
 	filePath := "restaurants.csv"
 
@@ -49,16 +33,11 @@ func main() {
 	done := make(chan struct{}) // Signal channel to say writing is done
 	var crawlWg sync.WaitGroup
 
+	// Start worker that 
 	go writeWorker(file, results, done)
 
-	// 1. Get restaurant website URLs from Google Places (nearby) API
-	// Set up parameters for func call
-	// center := LatLng{Latitude: 34.0549, Longitude: -118.2426}
-	// radius := 500.0
-	// maxCount := 10
-
 	// Get places
-	// places, err := GetNearbyPlaces(apiKey, center, radius, maxCount)
+	// places, err := GetNearbyPlaces()
 	// if err != nil {
 	// 	fmt.Println("Error getting places:", err)
 	// 	return
@@ -80,8 +59,8 @@ func main() {
 		{
 			DisplayName: struct {
 				Text string `json:"text"`
-			}{Text: "Wolf's Glen"},
-			WebsiteURI: "https://wolfsglen.com/",
+			}{Text: "Hangry Moon's"},
+			WebsiteURI: "https://www.hangrymoons.com/",
 		},
 		{
 			DisplayName: struct {

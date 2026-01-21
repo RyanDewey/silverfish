@@ -7,11 +7,33 @@ import (
 	"io"
 	"net/http"
 	"time"
+	"os"
+	"github.com/joho/godotenv"
+	"log"
 )
 
 // GetNearbyPlaces queries Google Places Nearby Search API and returns all results (up to 20 per location)
-func GetNearbyPlaces(apiKey string, center LatLng, radius float64, maxCount int) ([]Place, error) {
+func GetNearbyPlaces() ([]Place, error) {
+	// Load .env file
+	err := godotenv.Load()
+	if err != nil {
+		log.Fatalf("Error loading .env file: %v", err)
+	}
+
+	// Access the key
+	apiKey := os.Getenv("GOOGLE_MAPS_API_KEY")
+
+	if apiKey == "" {
+		log.Fatal("GOOGLE_MAPS_API_KEY not set in .env file")
+	}
+
+	// Set url to query
 	placesNearbyURL := "https://places.googleapis.com/v1/places:searchNearby"
+
+	// Set up parameters for api call
+	center := LatLng{Latitude: 34.0549, Longitude: -118.2426}
+	radius := 500.0
+	maxCount := 10
 
 	// Build request body
 	reqBody := NearbyRequest{
