@@ -1,5 +1,10 @@
 package main
 
+import ( 
+	"sync/atomic"
+	"time"
+)
+
 type RestaurantData struct {
 	URL           string
 	PhoneNumbers  []string
@@ -37,4 +42,19 @@ type Place struct {
 
 type NearbyResponse struct {
 	Places []Place `json:"places"`
+}
+type Metrics struct {
+	Start time.Time
+
+	DomainsStarted   atomic.Int64
+	DomainsFinished  atomic.Int64
+	DomainsWithEmail atomic.Int64
+	DomainsWithPhone atomic.Int64
+
+	RequestsStarted  atomic.Int64
+	RequestsOK       atomic.Int64
+	RequestsErrored  atomic.Int64
+
+	EmailsFound atomic.Int64
+	PhonesFound atomic.Int64
 }

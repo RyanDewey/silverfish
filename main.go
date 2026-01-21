@@ -7,10 +7,14 @@ import (
 	// "regexp"
 	"log"
 	"os"
+	"time"
 )
 
 // Main function
 func main() {
+	// Metric struct
+	m := &Metrics{Start: time.Now()}
+
 	// Set path for exporting file
 	filePath := "restaurants.csv"
 
@@ -90,7 +94,7 @@ func main() {
 	for _, url := range urls {
 		crawlWg.Add(1)
 		fmt.Println("Calling crawl site!")
-		go crawlSite(url, results, &crawlWg)
+		go crawlSite(url, results, &crawlWg, m)
 	}
 
 	crawlWg.Wait()
@@ -98,4 +102,15 @@ func main() {
 	<-done
 
 	fmt.Printf("\n\nSilverfish done crawling!\n")
+
+	// Get timing analytics
+	elapsed := time.Since(m.Start).Seconds()
+	domainsFinished := m.DomainsFinished.Load()
+	req := m.RequestsStarted.Load()
+	totalEmails := m.EmailsFound.Load()
+	totalPhones := m.PhonesFound.Load()
+
+	fmt.Printf("\nDONE: %.1fs, domains=%d (%.2f/s), requests=%d (%.1f rps),\nTotal Emails = %d, Total Phone numbers = %d\n",
+		elapsed, domainsFinished, float64(domainsFinished)/elapsed, req, float64(req)/elapsed, totalEmails, totalPhones)
+
 }

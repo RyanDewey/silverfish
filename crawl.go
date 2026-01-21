@@ -45,6 +45,7 @@ func isBlockedLink(link string) bool {
 
 var digitsRe = regexp.MustCompile(`\d+`)
 
+// Normalize phone numbers from regex into real numbers
 func normalizePhone(s string) (string, bool) {
 	// Keep digits only
 	digits := strings.Join(digitsRe.FindAllString(s, -1), "")
@@ -72,7 +73,12 @@ func normalizePhone(s string) (string, bool) {
 
 
 // Goroutine crawls a restaurant website concurrently and returns record to results channel
-func crawlSite(Url string, results chan<- RestaurantData, wg *sync.WaitGroup) {
+func crawlSite(Url string, results chan<- RestaurantData, wg *sync.WaitGroup, m *Metrics) {
+
+	// Start timer for domain
+	m.DomainsStarted.Add(1)
+	domainStart := time.Now()
+
 	defer wg.Done()
 
 	// Create collector
@@ -112,6 +118,18 @@ func crawlSite(Url string, results chan<- RestaurantData, wg *sync.WaitGroup) {
 		mu.Unlock()       // unlock before sending (avoid blocking while locked)
 		results <- recCopy
 		mu.Lock()
+		
+		m.DomainsFinished.Add(1)
+
+		if len(record.Emails) > 0 { m.DomainsWithEmail.Add(1) }
+		if len(record.PhoneNumbers) > 0 { m.DomainsWithPhone.Add(1) }
+
+		m.EmailsFound.Add(int64(len(record.Emails)))
+		m.PhonesFound.Add(int64(len(record.PhoneNumbers)))
+
+		// optional: keep domainStart->elapsed for latency stats
+		_ = time.Since(domainStart)
+
 	}
 
 	// Callback func for when html element is encountered
@@ -137,21 +155,19 @@ func crawlSite(Url string, results chan<- RestaurantData, wg *sync.WaitGroup) {
 		})
 
 		// Then scan the whole page for matches to the phone regex
+		e.DOM.Find("script, style, noscript").Remove() // Remove noise
+		phonePageText := strings.Join(strings.Fields(e.DOM.Text()), " ") // collapse whitespace
 
-		// Remove noise
-		e.DOM.Find("script, style, noscript").Remove()
-		// collapse whitespace
-		pageText := strings.Join(strings.Fields(e.DOM.Text()), " ") 
 		// Add regex phone matches to the record
-		matches := phoneRe.FindAllString(pageText, -1)
-		for _, m := range matches {
+		phoneMatches := phoneRe.FindAllString(phonePageText, -1)
+		for _, m := range phoneMatches {
 			if norm, ok := normalizePhone(m); ok {
 				record.PhoneNumbers = appendUnique(record.PhoneNumbers, norm)
 			}
 		}
 
+		// Check for mailto: links for high accuracy emails
 		email, _ := e.DOM.Find("a[href^='mailto:']").Attr("href")
-
 		if email != "" {
 			record.Emails = appendUnique(record.Emails, email[7:])
 		}
@@ -179,7 +195,7 @@ func crawlSite(Url string, results chan<- RestaurantData, wg *sync.WaitGroup) {
 		"info", "store", "pickup", "delivery",
 	}
 
-
+	// When encountering links, follow if valid
 	c.OnHTML("a[href]", func(e *colly.HTMLElement) {
 		link := e.Request.AbsoluteURL(e.Attr("href"))
 		if link == "" {
@@ -225,7 +241,8 @@ func crawlSite(Url string, results chan<- RestaurantData, wg *sync.WaitGroup) {
 		fmt.Printf("ERROR url=%s status=%d err=%v\n", urlStr, status, err)
 
 		mu.Lock()
-		pending--          
+		pending--
+		m.RequestsErrored.Add(1)     
 		finalizeIfDone()   // emit record even if pages failed
 		mu.Unlock()
 	})
@@ -234,6 +251,7 @@ func crawlSite(Url string, results chan<- RestaurantData, wg *sync.WaitGroup) {
 	c.OnRequest(func(_ *colly.Request) {
 		mu.Lock()
 		pending++
+		m.RequestsStarted.Add(1)
 		mu.Unlock()
 	})
 
@@ -241,6 +259,7 @@ func crawlSite(Url string, results chan<- RestaurantData, wg *sync.WaitGroup) {
 	c.OnScraped(func(_ *colly.Response) {
 		mu.Lock()
 		pending--
+		m.RequestsOK.Add(1)
 		finalizeIfDone()
 		mu.Unlock()
 		fmt.Println("Done crawling a page")
